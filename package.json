@@ -1,0 +1,15 @@
+{
+  "name": "@iamsamwen/strapi-query-helpers",
+  "version": "1.0.0",
+  "description": "add supports for groupBy and filters queries",
+  "main": "sr/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Sam Wen",
+  "license": "MIT",
+  "dependencies": {
+    "change-case": "^4.1.2",
+    "lodash": "^4.17.21"
+  }
+}
