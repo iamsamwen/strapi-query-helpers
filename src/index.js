@@ -22,11 +22,9 @@ async function run_group_by_count(uid, groupBy, {filters, publicationState}) {
 
     groupBy = get_group_by_array(meta, groupBy);
 
-    const qb = strapi.db.entityManager.createQueryBuilder(uid);
+    const query = strapi.db.entityManager.createQueryBuilder(uid).init({filters, groupBy}).count();
 
-    const to = qb.init({filters, groupBy}).count();
-
-    const result = await to.execute();
+    const result = await query.execute();
 
     if (result) return result.length;
 
@@ -43,12 +41,13 @@ async function run_group_by(uid, groupBy, {filters, fields, populate, publicatio
 
     const sql = get_full_sql(uid, fields, populate, orderBy, offset, limit, gb_sql, bindings);
 
-    const raw_result = await strapi.db.connection.context.raw(sql, bindings);
+    const result = await strapi.db.connection.context.raw(sql, bindings)
+
+    const raw_rows = get_data(result, true);
 
     const items = [];
-    for (const raw_item of raw_result[0]) {
-        const item = {};
-        for (const [key, value] of Object.entries(raw_item)) {
+    for (const item of raw_rows) {
+        for (const [key, value] of Object.entries(item)) {
             item[meta.columnToAttribute[key]] = value;
         }
         items.push(item);
@@ -70,12 +69,34 @@ async function run_filters(uid, filters_config, params) {
     const result = {};
     const promises = [];
     for (const { key, sql, bindings } of queries) {
-        promises.push(run_sql(result, key, sql, bindings));
+        promises.push(run_filters_sql(result, key, sql, bindings));
     }
 
     await Promise.all(promises);
 
     return normalize(result, filters_config);
+}
+
+function get_data(result, array = false) {
+    if (Array.isArray(result)) {
+        if (Array.isArray(result[0])) {
+            return get_data(result[0], array);
+        } else {
+            if (array) return result;
+            else return result[0]
+        }
+    } else {
+        return result;
+    }
+}
+
+async function run_filters_sql(result, key, sql, bindings) {
+    const raw_result = await strapi.db.connection.context.raw(sql, bindings);
+    if (key === 'ranges') {
+        result[key] = get_data(raw_result, false);
+    } else {
+        result[key] = get_data(raw_result, true);
+    }
 }
 
 function get_gb_sql(meta, filters, groupBy) {
@@ -234,15 +255,6 @@ function get_title_label(value) {
     if (!value) return '';
     if (value.toUpperCase() === value) return value;
     else return capitalCase(value);
-}
-
-async function run_sql(result, key, sql, bindings) {
-    const raw_result = await strapi.db.connection.context.raw(sql, bindings);
-    if (key === 'ranges') {
-        result[key] = raw_result[0];
-    } else {
-        result[key] = raw_result;
-    }
 }
 
 function get_sql_template(uid, filters, publicationState) {
