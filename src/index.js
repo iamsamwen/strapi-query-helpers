@@ -12,7 +12,7 @@ module.exports = {
     max_values
 }
 
-const selected_types = ['string', 'boolean', 'integer', 'biginteger', 'decimal', 'float'];
+const selected_types = ['string', 'boolean', 'enumeration', 'integer', 'biginteger', 'decimal', 'float'];
 
 async function run_group_by_count(uid, groupBy, {filters, publicationState}) {
 
@@ -138,7 +138,7 @@ function get_filters_config(uid, fields, filters_config) {
 
 function get_filter_type(key, type) {
     if (key === 'id' || !selected_types.includes(type)) return null;
-    if (['string', 'boolean'].includes(type)) {
+    if (['string', 'boolean', 'enumeration'].includes(type)) {
         return 'list';
     } else {
         return 'range';
@@ -147,8 +147,9 @@ function get_filter_type(key, type) {
 
 function normalize(result, filters_config) {
 
-    const ranges_data = result.ranges[0];
-    const total = Number(ranges_data.total);
+    const ranges = result.ranges;
+
+    const total = Number(ranges.total);
 
     const list = [];
 
@@ -160,13 +161,13 @@ function normalize(result, filters_config) {
 
         if (type === 'range') {
 
-            const count = Number(ranges_data[`count_${key}`]);
+            const count = Number(ranges[`count_${key}`]);
             if (isNaN(count) || count === 0) continue;
 
-            const min = ranges_data[`min_${key}`];
+            const min = ranges[`min_${key}`];
             if (isNaN(min)) continue;
 
-            const max = ranges_data[`max_${key}`];
+            const max = ranges[`max_${key}`];
             if (isNaN(max)) continue;
 
             if (values_config && values_config.min) {
@@ -237,7 +238,11 @@ function get_title_label(value) {
 
 async function run_sql(result, key, sql, bindings) {
     const raw_result = await strapi.db.connection.context.raw(sql, bindings);
-    result[key] = raw_result[0];
+    if (key === 'ranges') {
+        result[key] = raw_result[0];
+    } else {
+        result[key] = raw_result;
+    }
 }
 
 function get_sql_template(uid, filters, publicationState) {
@@ -281,7 +286,7 @@ function build_queries(uid, filters_config, params) {
             queries.push({key, sql, bindings});
             continue;
         }
-        
+
         if (type === 'range') {
             ranges_select += `, max(\`${column_name}\`) as \`max_${key}\`, min(\`${column_name}\`) as \`min_${key}\`, count(\`${column_name}\`) as \`count_${key}\``;
             continue;
