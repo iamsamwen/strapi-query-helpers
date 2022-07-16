@@ -1,6 +1,6 @@
 {
   "name": "@iamsamwen/strapi-query-helpers",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "add supports for groupBy and filters queries",
   "main": "sr/index.js",
   "scripts": {

@@ -3,13 +3,14 @@
 const fp = require('lodash/fp');
 const { capitalCase } = require('change-case');
 
+let max_values = 256;
+
 module.exports = {
     run_group_by_count,
     run_group_by,
     run_filters,
+    max_values
 }
-
-const max_values = 256;
 
 const selected_types = ['string', 'boolean', 'integer', 'biginteger', 'decimal', 'float'];
 
@@ -40,13 +41,7 @@ async function run_group_by(uid, groupBy, {filters, fields, populate, publicatio
 
     const [ gb_sql, bindings ] = get_gb_sql(meta, filters, groupBy);
 
-    const qb = strapi.db.entityManager.createQueryBuilder(uid);
-    const to = qb.init({select: fields, filters: {id: {$in: '*'}}, populate, orderBy, offset, limit});
-    const result = to.getKnexQuery().toSQL();
-
-    const sql = result.sql.replace(/`t0`/g, '`t1`').replace('in (?)', `in ( ${gb_sql} )`);
-    result.bindings.shift();
-    bindings.push(...result.bindings);
+    const sql = get_full_sql(uid, fields, populate, orderBy, offset, limit, gb_sql, bindings);
 
     const raw_result = await strapi.db.connection.context.raw(sql, bindings);
 
@@ -64,7 +59,11 @@ async function run_group_by(uid, groupBy, {filters, fields, populate, publicatio
 
 async function run_filters(uid, filters_config, params) {
 
-    filters_config = filters_config ? fp.cloneDeep(filters_config) : get_filters_config(uid, params.fields);
+    filters_config = get_filters_config(uid, params.fields, filters_config);
+
+    if (filters_config.length === 0) {
+        return [];
+    }
 
     const queries = build_queries(uid, filters_config, params);
 
@@ -75,6 +74,7 @@ async function run_filters(uid, filters_config, params) {
     }
 
     await Promise.all(promises);
+
     return normalize(result, filters_config);
 }
 
@@ -91,22 +91,58 @@ function get_gb_sql(meta, filters, groupBy) {
     return [ sql, result.bindings ];
 }
 
-function get_filters_config(uid, fields) {
+function get_full_sql(uid, fields, populate, orderBy, offset, limit, gb_sql, bindings) {
+    
+    const qb = strapi.db.entityManager.createQueryBuilder(uid);
+    const to = qb.init({select: fields, filters: {id: {$in: '*'}}, populate, orderBy, offset, limit});
+    const result = to.getKnexQuery().toSQL();
+
+    const sql = result.sql.replace(/`t0`/g, '`t1`').replace('in (?)', `in ( ${gb_sql} )`);
+    
+    result.bindings.shift();
+    bindings.push(...result.bindings);
+
+    return sql;
+}
+
+function get_filters_config(uid, fields, filters_config) {
 
     const meta = strapi.db.metadata.get(uid);
 
-    const filters_config = [];
-    for (const [ key, { type } ] of Object.entries(meta.attributes)) {
-        if (fields && !fields.includes(key)) continue;
-        if (key === 'id' || !selected_types.includes(type)) continue;
-        if (['string', 'boolean'].includes(type)) {
-            filters_config.push({key, type: 'list', title: capitalCase(key)});
-        } else {
-            filters_config.push({key, type: 'range', title: capitalCase(key)});
+    if (filters_config) {
+        const filters_config_clone = fp.cloneDeep(filters_config);
+        filters_config = [];
+        for (const filter of filters_config_clone) {
+            if (!filter.key) continue;
+            const attribute = meta.attributes[filter.key];
+            if (!attribute) continue;
+            if (!filter.type) {
+                const filter_type = get_filter_type(filter.key, attribute.type);
+                if (!filter_type) continue;
+                filter.type = filter_type;
+            }
+            filters_config.push(filter);
+        }
+    } else {
+        filters_config = [];
+        for (const [ key, { type } ] of Object.entries(meta.attributes)) {
+            if (fields && !fields.includes(key)) continue;
+            const filter_type = get_filter_type(key, type);
+            if (!filter_type) continue;
+            filters_config.push({key, type: filter_type});
         }
     }
 
     return filters_config;
+}
+
+function get_filter_type(key, type) {
+    if (key === 'id' || !selected_types.includes(type)) return null;
+    if (['string', 'boolean'].includes(type)) {
+        return 'list';
+    } else {
+        return 'range';
+    }
 }
 
 function normalize(result, filters_config) {
@@ -116,9 +152,11 @@ function normalize(result, filters_config) {
 
     const list = [];
 
-    for (const {key, type, key_props, ...rest} of filters_config) {
+    for (const {key, type, values_config, ...rest} of filters_config) {
 
         const entry = {key, type, ...rest};
+
+        if (!rest.title) rest.title = get_title_label(key);
 
         if (type === 'range') {
 
@@ -131,8 +169,20 @@ function normalize(result, filters_config) {
             const max = ranges_data[`max_${key}`];
             if (isNaN(max)) continue;
 
-            entry.min = min;
-            entry.max = max;
+            if (values_config && values_config.min) {
+                entry.min = { ...values_config.min };
+                entry.min.value = min;
+            } else {
+                entry.min = min;
+            }
+
+            if (values_config && values_config.max) {
+                entry.max = { ...values_config.max };
+                entry.max.value = max;
+            } else {
+                entry.max = max;
+            }
+
             entry.count = count;
             entry.full_set = (count === total);
 
@@ -142,16 +192,17 @@ function normalize(result, filters_config) {
 
             if (result[key].length === 0 || result[key].length > max_values) continue;
 
-            if (key_props) {
+            if (values_config) {
 
                 let sum = 0;
                 const items = [];
-                for (const key_prop of key_props) {
-                    const item = result[key].find(x => x.key === key_prop.key);
+                for (const value_prop of values_config) {
+                    const item = result[key].find(x => x.value === value_prop.value);
                     if (!item) continue;
+                    if (!item.label) item.label = get_title_label(value_prop.value);
                     const count = Number(item.count)
                     sum += count;
-                    items.push({...key_prop, count});
+                    items.push({...value_prop, count});
                 }
                 entry.items = items;
 
@@ -163,10 +214,7 @@ function normalize(result, filters_config) {
 
                 let sum = 0;
                 for (const item of entry.items) {
-                    if (item.key) {
-                        if (item.key.toUpperCase() === item.key) item.label = item.key;
-                        else item.label = capitalCase(item.key);
-                    }
+                    item.label = get_title_label(item.value);
                     item.count = Number(item.count);
                     sum += item.count;
                 }
@@ -180,6 +228,12 @@ function normalize(result, filters_config) {
 
     return list;
 };
+
+function get_title_label(value) {
+    if (!value) return '';
+    if (value.toUpperCase() === value) return value;
+    else return capitalCase(value);
+}
 
 async function run_sql(result, key, sql, bindings) {
     const raw_result = await strapi.db.connection.context.raw(sql, bindings);
@@ -216,19 +270,23 @@ function build_queries(uid, filters_config, params) {
     for (const {key, type} of filters_config) {
         
         if (!key || !type) continue;
+
         const column_name = attributes[key].columnName;
+
         if (type === 'list') {
-            const select = `\`t0\`.${column_name} as \`key\`, count(\`${column_name}\`) as \`count\``;
+            const select = `\`t0\`.${column_name} as \`value\`, count(\`${column_name}\`) as \`count\``;
             const groupBy = ` group by \`${column_name}\``;
             let sql = sql_template.replace('{{select}}', select);
             sql = sql.replace('{{groupBy}}', groupBy);
             queries.push({key, sql, bindings});
             continue;
         }
+        
         if (type === 'range') {
             ranges_select += `, max(\`${column_name}\`) as \`max_${key}\`, min(\`${column_name}\`) as \`min_${key}\`, count(\`${column_name}\`) as \`count_${key}\``;
             continue;
         }
+
         console.error(`build_queries, ${key} has an unknown type ${type}`);
     }
 
