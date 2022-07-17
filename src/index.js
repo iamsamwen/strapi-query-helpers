@@ -1,5 +1,7 @@
 'use strict';
 
+const util = require('util');
+const debug = require('debug')('query-helpers:debug');
 const fp = require('lodash/fp');
 const { capitalCase } = require('change-case');
 
@@ -15,6 +17,8 @@ module.exports = {
 const selected_types = ['string', 'boolean', 'enumeration', 'integer', 'biginteger', 'decimal', 'float'];
 
 async function run_group_by_count(uid, groupBy, {filters, publicationState}) {
+
+    console.log('run_group_by_count', uid);
 
     const meta = strapi.db.metadata.get(uid);
 
@@ -37,9 +41,13 @@ async function run_group_by(uid, groupBy, {filters, fields, populate, publicatio
 
     filters = update_filters(meta, filters, publicationState);
 
-    const [ gb_sql, bindings ] = get_gb_sql(meta, filters, groupBy);
+    const [ gb_sql, bindings ] = get_gb_sql(meta, filters, groupBy, orderBy);
 
-    const sql = get_full_sql(uid, fields, populate, orderBy, offset, limit, gb_sql, bindings);
+    let sql = get_full_sql(uid, fields, populate, orderBy, offset, limit, gb_sql, bindings);
+    
+    if (is_postgres()) sql = sql.replace(/`/g, '"');
+
+    debug('run_group_by', util.inspect({sql, bindings},  {breakLength: Infinity, depth: null, colors: true}));
 
     const result = await strapi.db.connection.context.raw(sql, bindings)
 
@@ -48,8 +56,10 @@ async function run_group_by(uid, groupBy, {filters, fields, populate, publicatio
     const items = [];
     for (const row of raw_rows) {
         const item = {};
-        for (const [key, value] of Object.entries(row)) {
-            item[meta.columnToAttribute[key]] = value;
+        for (const [column_name, value] of Object.entries(row)) {
+            const key = meta.columnToAttribute[column_name]
+            if (!key) continue;
+            item[key] = value;
         }
         items.push(item);
     }
@@ -70,37 +80,13 @@ async function run_filters(uid, filters_config, params) {
     const result = {};
     const promises = [];
     for (const { key, sql, bindings } of queries) {
+        debug('run_filters', util.inspect({ key, sql, bindings },  {breakLength: Infinity, depth: null, colors: true}));
         promises.push(run_filters_sql(result, key, sql, bindings));
     }
 
     await Promise.all(promises);
 
     return normalize(result, filters_config);
-}
-
-function get_data(result, array = false) {
-
-    if (is_postgres()) {
-
-        if (array) {
-            return result.rows;
-        } else {
-            return result.rows[0];
-        }
-
-    } else {
-
-        if (Array.isArray(result)) {
-            if (Array.isArray(result[0])) {
-                return get_data(result[0], array);
-            } else {
-                if (array) return result;
-                else return result[0]
-            }
-        } else {
-            return result;
-        }
-    }
 }
 
 async function run_filters_sql(result, key, sql, bindings) {
@@ -112,17 +98,33 @@ async function run_filters_sql(result, key, sql, bindings) {
     }
 }
 
-function get_gb_sql(meta, filters, groupBy) {
+function get_gb_sql(meta, filters, groupBy, orderBy) {
 
     const qb = strapi.db.entityManager.createQueryBuilder(meta.uid);
 
-    groupBy = get_group_by_array(meta, groupBy);
+    const group_by_array = get_group_by_array(meta, groupBy);
+    
+    let partition_by = '';
+    for (const group_by of group_by_array) {
+        if (partition_by.length > 0) partition_by += ', ';
+        partition_by += '`t0`.`' + group_by + '`';
+    }
 
-    const to = qb.init({select: ['id'], filters, groupBy});
+    const to = qb.init({select: ['id'], filters, orderBy});
+
     const result = to.getKnexQuery().toSQL();
-    const sql = is_postgres() ? 
-        result.sql.replace('select "t0"."id"', 'select min("t0"."id") as id') :
-        result.sql.replace('select `t0`.`id`', 'select min(`t0`.`id`) as id');
+    const parts = result.sql.split(' from ');
+
+    let order_by = '';
+    if (orderBy) {
+        const pparts = parts[1].split(' order by ');
+        order_by = ' order by ' + pparts[1];
+        parts[1] = pparts[0];
+    }
+
+    const sql = 'with added_row_no as (' + parts[0] + 
+        ', row_number() over ( partition by ' + partition_by + order_by +
+        ' ) as row_no from ' + parts[1] + ' ) select id from added_row_no where row_no = 1'; 
 
     return [ sql, result.bindings ];
 }
@@ -133,10 +135,8 @@ function get_full_sql(uid, fields, populate, orderBy, offset, limit, gb_sql, bin
     const to = qb.init({select: fields, filters: {id: {$in: '*'}}, populate, orderBy, offset, limit});
     const result = to.getKnexQuery().toSQL();
 
-    const sql = is_postgres() ?
-        result.sql.replace(/"t0"/g, '"t1"').replace('in (?)', `in ( ${gb_sql} )`) :
-        result.sql.replace(/`t0`/g, '`t1`').replace('in (?)', `in ( ${gb_sql} )`);
-   
+    const sql = result.sql.replace(/`t0`/g, '`t1`').replace('in (?)', `in ( ${gb_sql} )`);
+
     result.bindings.shift();
     bindings.push(...result.bindings);
 
@@ -309,22 +309,17 @@ function build_queries(uid, filters_config, params) {
         const column_name = attributes[key].columnName;
 
         if (type === 'list') {
-            const select = is_postgres() ?
-                `"t0"."${column_name}" as "value", count("${column_name}") as "count\"` :
-                `\`t0\`.\`${column_name}\` as \`value\`, count(\`${column_name}\`) as \`count\``;
-            const groupBy = is_postgres() ?
-                ` group by "${column_name}"`:
-                ` group by \`${column_name}\``;
+            const select = `\`t0\`.\`${column_name}\` as \`value\`, count(\`${column_name}\`) as \`count\``;
+            const groupBy = ` group by \`${column_name}\``;
             let sql = sql_template.replace('{{select}}', select);
             sql = sql.replace('{{groupBy}}', groupBy);
+            if (is_postgres()) sql = sql.replace(/`/g, '"');
             queries.push({key, sql, bindings});
             continue;
         }
 
         if (type === 'range') {
-            ranges_select += is_postgres() ?
-                `, max("${column_name}") as "max_${key}", min("${column_name}") as "min_${key}", count("${column_name}") as "count_${key}"` :
-                `, max(\`${column_name}\`) as \`max_${key}\`, min(\`${column_name}\`) as \`min_${key}\`, count(\`${column_name}\`) as \`count_${key}\``;
+            ranges_select += `, max(\`${column_name}\`) as \`max_${key}\`, min(\`${column_name}\`) as \`min_${key}\`, count(\`${column_name}\`) as \`count_${key}\``;
             continue;
         }
 
@@ -333,6 +328,9 @@ function build_queries(uid, filters_config, params) {
 
     let sql = sql_template.replace('{{groupBy}}', '');
     sql = sql.replace('{{select}}', ranges_select);
+
+    if (is_postgres()) sql = sql.replace(/`/g, '"');
+
     queries.push({ key: 'ranges', sql, bindings});
 
     return queries;
@@ -363,6 +361,31 @@ function update_filters(meta, filters, publicationState) {
     }
 
     return filters;
+}
+
+function get_data(result, array = false) {
+
+    if (is_postgres()) {
+
+        if (array) {
+            return result.rows;
+        } else {
+            return result.rows[0];
+        }
+
+    } else {
+
+        if (Array.isArray(result)) {
+            if (Array.isArray(result[0])) {
+                return get_data(result[0], array);
+            } else {
+                if (array) return result;
+                else return result[0]
+            }
+        } else {
+            return result;
+        }
+    }
 }
 
 let postgres = null;
