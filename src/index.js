@@ -18,8 +18,6 @@ const selected_types = ['string', 'boolean', 'enumeration', 'integer', 'biginteg
 
 async function run_group_by_count(uid, groupBy, {filters, publicationState}) {
 
-    console.log('run_group_by_count', uid);
-
     const meta = strapi.db.metadata.get(uid);
 
     filters = update_filters(meta, filters, publicationState);
@@ -171,7 +169,7 @@ function get_filters_config(uid, fields, filters_config) {
         }
     }
 
-    console.log(filters_config);
+    debug('get_filters_config', util.inspect(filters_config,  {breakLength: Infinity, depth: null, colors: true}));
 
     return filters_config;
 }
