@@ -171,6 +171,8 @@ function get_filters_config(uid, fields, filters_config) {
         }
     }
 
+    console.log(filters_config);
+
     return filters_config;
 }
 
@@ -195,7 +197,7 @@ function normalize(result, filters_config) {
 
         const entry = {key, type, ...rest};
 
-        if (!rest.title) rest.title = get_title_label(key);
+        if (!entry.title) entry.title = get_title_label(key);
 
         if (type === 'range') {
 
