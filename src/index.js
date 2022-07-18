@@ -105,7 +105,7 @@ function get_gb_sql(meta, filters, groupBy, orderBy) {
     let partition_by = '';
     for (const group_by of group_by_array) {
         if (partition_by.length > 0) partition_by += ', ';
-        partition_by += '`t0`.`' + group_by + '`';
+        partition_by += group_by;
     }
 
     const to = qb.init({select: ['id'], filters, orderBy});
@@ -344,7 +344,7 @@ function get_group_by_array(meta, groupBy) {
     for (const key of groupBy) {
         const attribute = meta.attributes[key];
         if (!attribute) items.push(key);
-        else items.push(`t0.${attribute.columnName}`);
+        else items.push(attribute.columnName);
     }
 
     return items;
